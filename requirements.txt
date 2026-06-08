@@ -1,0 +1,54 @@
+# Core LLM & Orchestration
+langchain
+langchain-community
+langchain-google-genai
+langgraph
+langchain-huggingface
+
+# LangSmith (observability + tracing)
+langsmith
+
+# Vector Store
+chromadb
+
+# # Embeddings & Reranking
+# sentence-transformers
+# huggingface-hub
+
+# Document Loaders
+pypdf
+unstructured
+python-docx
+openpyxl
+requests
+beautifulsoup4
+
+# Retrieval
+rank-bm25
+
+# API Backend
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
+pydantic
+pydantic-settings
+
+# Evaluation
+ragas
+datasets
+
+# Utilities
+python-dotenv
+tenacity
+loguru
+tqdm
+
+# # Frontend
+# streamlit
+# streamlit-chat
+
+# # Dev & Testing
+# pytest
+# pytest-asyncio
+# httpx
