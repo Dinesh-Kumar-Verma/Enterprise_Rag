@@ -44,11 +44,11 @@ tenacity
 loguru
 tqdm
 
-# # Frontend
-# streamlit
-# streamlit-chat
+# Frontend
+streamlit
+streamlit-chat
 
-# # Dev & Testing
-# pytest
-# pytest-asyncio
-# httpx
+# Dev & Testing
+pytest
+pytest-asyncio
+httpx

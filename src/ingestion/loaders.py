@@ -156,8 +156,6 @@ class DocumentLoader:
 
 def main():
     loader = DocumentLoader()
-    print(f"Total documents: {len(docs_from_file)}")
-
     # Example usage:
     # docs_from_file = loader.load_file(r"C:\Users\Dinesh Verma\Downloads\Two Pointer Pattern.pdf")
     # docs_from_url = loader.load_url("https://example.com")
