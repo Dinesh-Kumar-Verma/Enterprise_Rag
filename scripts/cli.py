@@ -46,7 +46,7 @@ def cmd_ingest(args, rag: EnterpriseRAG):
 
 def cmd_query(args, rag: EnterpriseRAG):
     print(f"\n📝 Query: {args.query}\n{'─'*60}")
-    result = rag.query(args.query, use_hyde=not args.no_hyde)
+    result = rag.query_sync(args.query, use_hyde=not args.no_hyde)
 
     print(f"\n💬 Answer:\n{result['answer']}")
 

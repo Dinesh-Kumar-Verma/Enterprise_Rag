@@ -140,7 +140,7 @@ async def query(req: QueryRequest):
     if not rag:
         raise HTTPException(503, "RAG not initialised")
     try:
-        result = rag.query(req.query, use_hyde=req.use_hyde)
+        result = await rag.query(req.query, use_hyde=req.use_hyde)
         return QueryResponse(**result)
     except SanitizationError as e:
         raise HTTPException(422, str(e))

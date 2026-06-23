@@ -5,7 +5,7 @@ Includes input sanitization and two-layer caching (query + embedding).
 
 from __future__ import annotations
 
-from ast import If
+import asyncio
 import time
 from pathlib import Path
 
@@ -102,11 +102,11 @@ class EnterpriseRAG:
     # ── Query ─────────────────────────────────────────────────────────────────
 
     @traceable(name="rag_query", run_type="chain")
-    def query(self, query: str, use_hyde: bool = True) -> dict:
+    async def query(self, query: str, use_hyde: bool = True) -> dict:
         query = sanitize_query(query)   # raises SanitizationError on injection/bad input
 
         # Check input guardrails
-        blocked_msg = self.guardrails.check_input_sync(query)
+        blocked_msg = await self.guardrails.check_input(query)
         if blocked_msg:
             logger.warning(f"Query blocked by NeMo Guardrails: {query[:80]}")
             return {
@@ -144,7 +144,7 @@ class EnterpriseRAG:
             latencies["generation"] = time.perf_counter() - t0
 
         # Check output guardrails
-        final_answer = self.guardrails.check_output_sync(query, result["answer"])
+        final_answer = await self.guardrails.check_output(query, result["answer"])
 
         self.tracker.log_query(
             query=query,
@@ -172,6 +172,10 @@ class EnterpriseRAG:
             self.query_cache.set_result(query, use_hyde, output)
 
         return output
+
+    def query_sync(self, query: str, use_hyde: bool = True) -> dict:
+        """Sync wrapper around the async query() for non-async callers (e.g. CLI)."""
+        return asyncio.get_event_loop().run_until_complete(self.query(query, use_hyde=use_hyde))
 
     @traceable(name="rag_stream", run_type="chain")
     async def astream(self, query: str, use_hyde: bool = True):
