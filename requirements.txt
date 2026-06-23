@@ -52,3 +52,7 @@ streamlit-chat
 pytest
 pytest-asyncio
 httpx
+
+# Security & Guardrails
+nemoguardrails>=0.10.0
+

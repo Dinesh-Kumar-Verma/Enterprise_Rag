@@ -28,6 +28,7 @@ from src.utils.sanitizer import (
     sanitize_url,
 )
 from src.utils.cache import get_query_cache
+from src.security.guardrails import RAGGuardrails
 
 settings = get_settings()
 
@@ -45,6 +46,7 @@ class EnterpriseRAG:
         self.generator = RAGPipeline()
         self.tracker = LangSmithTracker()
         self.query_cache = get_query_cache()
+        self.guardrails = RAGGuardrails()
 
         logger.info(f"EnterpriseRAG initialised | env={settings.app_env}")
 
@@ -103,6 +105,19 @@ class EnterpriseRAG:
     def query(self, query: str, use_hyde: bool = True) -> dict:
         query = sanitize_query(query)   # raises SanitizationError on injection/bad input
 
+        # Check input guardrails
+        blocked_msg = self.guardrails.check_input_sync(query)
+        if blocked_msg:
+            logger.warning(f"Query blocked by NeMo Guardrails: {query[:80]}")
+            return {
+                "answer": blocked_msg,
+                "sources": [],
+                "query_type": "OUT_OF_SCOPE",
+                "is_grounded": True,
+                "latencies": {"guardrails": 0.0},
+                "cached": False,
+            }
+
         # Check query cache first
         cached = self.query_cache.get_result(query, use_hyde)
         if cached is not None:
@@ -128,9 +143,12 @@ class EnterpriseRAG:
             result = self.generator.run(query, context, sources)
             latencies["generation"] = time.perf_counter() - t0
 
+        # Check output guardrails
+        final_answer = self.guardrails.check_output_sync(query, result["answer"])
+
         self.tracker.log_query(
             query=query,
-            answer=result["answer"],
+            answer=final_answer,
             sources=sources,
             latencies=latencies,
             metadata={
@@ -141,7 +159,7 @@ class EnterpriseRAG:
         )
 
         output = {
-            "answer": result["answer"],
+            "answer": final_answer,
             "sources": sources,
             "query_type": result["query_type"],
             "is_grounded": result["is_grounded"],
@@ -158,6 +176,15 @@ class EnterpriseRAG:
     @traceable(name="rag_stream", run_type="chain")
     async def astream(self, query: str, use_hyde: bool = True):
         query = sanitize_query(query)
+
+        # Check input guardrails
+        blocked_msg = await self.guardrails.check_input(query)
+        if blocked_msg:
+            logger.warning(f"Query blocked by NeMo Guardrails: {query[:80]}")
+            yield {"type": "sources", "data": []}
+            yield {"type": "token", "data": blocked_msg}
+            yield {"type": "done"}
+            return
 
         candidates = self.retriever.retrieve(query, use_hyde=use_hyde)
         reranked = self.reranker.rerank(query, candidates)

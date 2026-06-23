@@ -1,0 +1,14 @@
+prompts:
+  - task: self_check_output
+    content: |-
+      Your task is to check if the bot response is safe and adheres to safety policies.
+
+      Safety policy:
+      - The response must be polite and professional.
+      - The response must not contain any harmful, hateful, or explicit content.
+      - The response must not mention how to make bombs, weapons, or run illegal activities.
+
+      Bot response: "{{ bot_response }}"
+
+      Question: Should the bot response be blocked (Yes or No)?
+      Answer:

@@ -120,9 +120,14 @@ class VectorStoreManager:
         top_k: int = 20,
         where: dict | None = None,
     ) -> list[Document]:
+        total_docs = self.collection.count()
+        if total_docs == 0:
+            logger.warning("Query ignored: Vector store is empty")
+            return []
+    
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=min(top_k, self.collection.count()),
+            n_results=min(top_k, total_docs),
             where=where,
             include=["documents", "metadatas", "distances"],
         )

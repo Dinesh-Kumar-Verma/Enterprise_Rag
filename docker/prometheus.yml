@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "enterprise_rag"
+    static_configs:
+      - targets: ["api:8002"]
+    metrics_path: /metrics

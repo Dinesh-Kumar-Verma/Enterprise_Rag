@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-
+from typing import DefaultDict
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
@@ -102,19 +102,20 @@ class ChunkingPipeline:
         return unique
 
     def _reindex_chunks(self, chunks: list[Document]) -> list[Document]:
-        """
-        Reassign chunk indices after deduplication
-        so indices remain continuous.
-        """
-        total_chunks = len(chunks)
-
-        for idx, chunk in enumerate(chunks):
-            chunk.metadata["chunk_index"] = idx
-            chunk.metadata["total_chunks"] = total_chunks
-
-            # Keep chunk_id aligned with new index
+        """Reassign chunk indices grouped by parent document."""
+        # Group chunks by doc_hash
+        by_doc: dict[str, list[Document]] = DefaultDict(list)
+        for chunk in chunks:
             doc_hash = chunk.metadata.get("doc_hash", "unknown")
-            chunk.metadata["chunk_id"] = f"{doc_hash}_{idx}"
+            by_doc[doc_hash].append(chunk)
+
+        # Reindex each group locally
+        for doc_hash, doc_chunks in by_doc.items():
+            total = len(doc_chunks)
+            for idx, chunk in enumerate(doc_chunks):
+                chunk.metadata["chunk_index"] = idx
+                chunk.metadata["total_chunks"] = total
+                chunk.metadata["chunk_id"] = f"{doc_hash}_{idx}"
 
         return chunks
 

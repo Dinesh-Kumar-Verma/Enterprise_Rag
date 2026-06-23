@@ -122,12 +122,13 @@ class RAGPipeline:
             return {**state, "is_grounded": True}
 
         try:
-            response = self.llm.invoke(
-                HALLUCINATION_CHECK_PROMPT.format(
-                    context=state["context"][:4000],
-                    answer=state["answer"],
-                )
+            prompt = (
+                HALLUCINATION_CHECK_PROMPT
+                .replace("{context}", state["context"][:4000])
+                .replace("{answer}", state["answer"])
             )
+            response = self.llm.invoke(prompt)
+    
             is_grounded = "GROUNDED" in response.content.upper()
         except Exception:
             is_grounded = True
@@ -168,7 +169,8 @@ class RAGPipeline:
             self._should_retry,
             {"end": END, "regenerate": "regenerate"},
         )
-        workflow.add_edge("regenerate", END)
+        workflow.add_edge("regenerate", "check_hallucination")
+
 
         return workflow.compile()
 
