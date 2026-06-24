@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     # LLM
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
 
     # Embeddings
     hf_api_key: str = ""

@@ -1,28 +1,7 @@
 import os
-# Set LLM framework to LangChain to support google engine seamlessly
+
+# NeMo Guardrails needs LangChain framework for non-native providers like Groq
 os.environ["NEMOGUARDRAILS_LLM_FRAMEWORK"] = "langchain"
-
-try:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    
-    # Monkeypatch ChatGoogleGenerativeAI to translate max_tokens to max_output_tokens
-    # preventing Pydantic ValidationError in newer versions of langchain-google-genai.
-    original_prepare_request = ChatGoogleGenerativeAI._prepare_request
-
-    def patched_prepare_request(self, messages, stop=None, generation_config=None, **kwargs):
-        if "max_tokens" in kwargs:
-            max_tokens = kwargs.pop("max_tokens")
-            if "max_output_tokens" not in kwargs:
-                kwargs["max_output_tokens"] = max_tokens
-        if generation_config and "max_tokens" in generation_config:
-            max_tokens = generation_config.pop("max_tokens")
-            if "max_output_tokens" not in generation_config:
-                generation_config["max_output_tokens"] = max_tokens
-        return original_prepare_request(self, messages, stop=stop, generation_config=generation_config, **kwargs)
-
-    ChatGoogleGenerativeAI._prepare_request = patched_prepare_request
-except ImportError:
-    pass
 
 from pathlib import Path
 from loguru import logger
@@ -45,15 +24,12 @@ class RAGGuardrails:
             logger.warning("nemoguardrails is not installed. Guardrails will be disabled. Run `pip install nemoguardrails` to enable.")
             return
 
-        # Set LLM framework to LangChain to support google engine seamlessly
-        os.environ["NEMOGUARDRAILS_LLM_FRAMEWORK"] = "langchain"
-
-        # NeMo Guardrails expects GOOGLE_API_KEY for the Gemini engine
-        if "GOOGLE_API_KEY" not in os.environ and settings.gemini_api_key:
-            os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
+        # NeMo Guardrails expects GROQ_API_KEY for the Groq engine
+        if "GROQ_API_KEY" not in os.environ and settings.groq_api_key:
+            os.environ["GROQ_API_KEY"] = settings.groq_api_key
 
         config_dir = Path(__file__).parents[2] / "config" / "guardrails"
-        
+
         if config_dir.exists():
             try:
                 logger.info(f"Loading NeMo Guardrails configuration from: {config_dir}")
@@ -72,7 +48,7 @@ class RAGGuardrails:
         """
         if not self.enabled or not self.rails:
             return None
-            
+
         try:
             # Generate response via guardrails logic
             response = await self.rails.generate_async(prompt=query)
@@ -85,7 +61,7 @@ class RAGGuardrails:
                 return response
         except Exception as e:
             logger.error(f"Error executing input guardrails: {e}")
-            
+
         return None
 
     def check_input_sync(self, query: str) -> str | None:
@@ -94,7 +70,7 @@ class RAGGuardrails:
         """
         if not self.enabled or not self.rails:
             return None
-            
+
         try:
             response = self.rails.generate(prompt=query)
             if response in [
@@ -104,7 +80,7 @@ class RAGGuardrails:
                 return response
         except Exception as e:
             logger.error(f"Error executing sync input guardrails: {e}")
-            
+
         return None
 
     async def check_output(self, query: str, response_text: str) -> str:
@@ -145,4 +121,3 @@ class RAGGuardrails:
         except Exception as e:
             logger.error(f"Error executing sync output guardrails: {e}")
             return response_text
-

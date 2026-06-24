@@ -1,7 +1,7 @@
 models:
   - type: main
-    engine: google_genai
-    model: gemini-2.5-flash
+    engine: groq
+    model: llama-3.3-70b-versatile
 
 rails:
   output:
