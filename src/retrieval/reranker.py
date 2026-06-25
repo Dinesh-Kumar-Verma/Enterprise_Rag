@@ -93,7 +93,9 @@ class ContextBuilder:
 
         if not relevant:
             logger.warning(f"No docs passed relevance threshold {self.threshold}")
-            relevant = documents[:3]
+            # Return EMPTY context — the pipeline will handle this gracefully
+            # instead of forcing irrelevant docs into the answer
+            return "", []
 
         budget = self.max_tokens
         selected: list[Document] = []

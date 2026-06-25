@@ -1,6 +1,6 @@
 """
 EnterpriseRAG orchestrator — wires ingestion, retrieval, generation, observability.
-Includes input sanitization and two-layer caching (query + embedding).
+Includes input sanitization, two-layer caching, and early routing for chat queries.
 """
 
 from __future__ import annotations
@@ -126,6 +126,27 @@ class EnterpriseRAG:
 
         latencies: dict[str, float] = {}
 
+        # ── Step 1: Route the query (cheap, 1 LLM call) ──
+        with track_latency("generation"):
+            t0 = time.perf_counter()
+            result = self.generator.run(query, context="", sources=[])
+            latencies["generation"] = time.perf_counter() - t0
+
+        query_type = result["query_type"]
+
+        # ── Step 2: If CONVERSATIONAL or OUT_OF_SCOPE, return immediately — no retrieval ──
+        if query_type in ("CONVERSATIONAL", "OUT_OF_SCOPE"):
+            final_answer = await self.guardrails.check_output(query, result["answer"])
+            return {
+                "answer": final_answer,
+                "sources": [],
+                "query_type": query_type,
+                "is_grounded": True,
+                "latencies": {k: round(v, 3) for k, v in latencies.items()},
+                "cached": False,
+            }
+
+        # ── Step 3: RETRIEVAL — do full pipeline ──
         with track_latency("retrieval"):
             t0 = time.perf_counter()
             candidates = self.retriever.retrieve(query, use_hyde=use_hyde)
@@ -141,15 +162,18 @@ class EnterpriseRAG:
         with track_latency("generation"):
             t0 = time.perf_counter()
             result = self.generator.run(query, context, sources)
-            latencies["generation"] = time.perf_counter() - t0
+            latencies["generation"] += time.perf_counter() - t0
 
-        # Check output guardrails
+        # Override sources when no docs were relevant (graph sets NO_RELEVANT_DOCS)
+        final_sources = [] if result["query_type"] == "NO_RELEVANT_DOCS" else sources
+
+        # Check output guardrails on the generated answer
         final_answer = await self.guardrails.check_output(query, result["answer"])
 
         self.tracker.log_query(
             query=query,
             answer=final_answer,
-            sources=sources,
+            sources=final_sources,
             latencies=latencies,
             metadata={
                 "use_hyde": use_hyde,
@@ -160,22 +184,33 @@ class EnterpriseRAG:
 
         output = {
             "answer": final_answer,
-            "sources": sources,
+            "sources": final_sources,
             "query_type": result["query_type"],
             "is_grounded": result["is_grounded"],
             "latencies": {k: round(v, 3) for k, v in latencies.items()},
             "cached": False,
         }
 
-        # Only cache grounded answers
-        if result["is_grounded"]:
+        # Only cache grounded answers with actual sources
+        if result["is_grounded"] and final_sources:
             self.query_cache.set_result(query, use_hyde, output)
 
         return output
 
     def query_sync(self, query: str, use_hyde: bool = True) -> dict:
         """Sync wrapper around the async query() for non-async callers (e.g. CLI)."""
-        return asyncio.get_event_loop().run_until_complete(self.query(query, use_hyde=use_hyde))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Already inside an event loop (e.g. Jupyter) — spawn a new thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, self.query(query, use_hyde=use_hyde)).result()
+        else:
+            return asyncio.run(self.query(query, use_hyde=use_hyde))
 
     @traceable(name="rag_stream", run_type="chain")
     async def astream(self, query: str, use_hyde: bool = True):
@@ -187,19 +222,49 @@ class EnterpriseRAG:
             logger.warning(f"Query blocked by NeMo Guardrails: {query[:80]}")
             yield {"type": "sources", "data": []}
             yield {"type": "token", "data": blocked_msg}
-            yield {"type": "done"}
+            yield {"type": "done", "query_type": "OUT_OF_SCOPE"}
             return
 
+        # Route first — skip retrieval for conversational queries
+        route_result = self.generator.run(query, context="", sources=[])
+        query_type = route_result["query_type"]
+
+        if query_type in ("CONVERSATIONAL", "OUT_OF_SCOPE"):
+            yield {"type": "sources", "data": []}
+            yield {"type": "token", "data": route_result["answer"]}
+            yield {"type": "done", "query_type": query_type}
+            return
+
+        # Full retrieval path
         candidates = self.retriever.retrieve(query, use_hyde=use_hyde)
         reranked = self.reranker.rerank(query, candidates)
         context, sources = self.context_builder.build(reranked, query)
 
+        # No relevant docs → use no-context path
+        if not context:
+            no_ctx_result = self.generator.run(query, context="", sources=[])
+            yield {"type": "sources", "data": []}
+            yield {"type": "token", "data": no_ctx_result["answer"]}
+            yield {"type": "done", "query_type": "NO_RELEVANT_DOCS"}
+            return
+
         yield {"type": "sources", "data": sources}
 
+        # Collect streamed tokens, then run output guardrails on the full answer
+        collected_tokens: list[str] = []
         async for token in self.generator.stream(query, context, sources):
+            collected_tokens.append(token)
             yield {"type": "token", "data": token}
 
-        yield {"type": "done"}
+        # Check output guardrails on the assembled answer
+        raw_answer = "".join(collected_tokens)
+        final_answer = await self.guardrails.check_output(query, raw_answer)
+
+        if final_answer != raw_answer:
+            # NeMo modified or blocked the output — send the corrected version
+            yield {"type": "output_guarded", "data": final_answer}
+
+        yield {"type": "done", "query_type": "RETRIEVAL"}
 
     def log_feedback(self, run_id: str, score: float, comment: str = "") -> None:
         self.tracker.log_feedback(run_id, score, comment)
@@ -210,7 +275,7 @@ class EnterpriseRAG:
             "query_cache": self.query_cache.stats,
             "settings": {
                 "embedding_model": settings.embedding_model,
-                "llm_model": settings.gemini_model,
+                "llm_model": settings.groq_model,
                 "top_k_retrieval": settings.top_k_retrieval,
                 "top_k_rerank": settings.top_k_rerank,
                 "relevance_threshold": settings.relevance_threshold,
@@ -222,6 +287,6 @@ class EnterpriseRAG:
 def main():
     file_path = r"C:\Users\Dinesh Verma\Downloads\Two Pointer Pattern.pdf"
     EnterpriseRAG().ingest_file(file_path)
-    
+
 if __name__ == "__main__":
     main()

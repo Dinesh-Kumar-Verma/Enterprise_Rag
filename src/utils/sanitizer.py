@@ -1,6 +1,6 @@
 """
 Input sanitization for all user-facing inputs:
-- query strings
+- query strings (format/type/length/SQL only — prompt injection handled by NeMo Guardrails)
 - file uploads
 - URLs
 - free text ingestion
@@ -23,19 +23,10 @@ MAX_FILE_SIZE_MB = 50
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
 ALLOWED_URL_SCHEMES = {"http", "https"}
 
-INJECTION_PATTERNS = [
-    r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions",
-    r"you\s+are\s+now\s+",
-    r"act\s+as\s+(a\s+)?(?!an?\s+assistant)",
-    r"forget\s+(everything|all)",
-    r"(system|sys)\s*prompt",
-    r"<\s*/?system\s*>",
-    r"###\s*instruction",
-    r"jailbreak",
-    r"\[INST\]",
-    r"<\|im_start\|>",
-]
-COMPILED_INJECTION = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
+# NOTE: prompt-injection patterns (ignore instructions, jailbreak, etc.) are
+# intentionally removed from here — NeMo Guardrails handles those semantically
+# via LLM and returns a graceful refusal.  Keeping regex checks here would
+# duplicate guardrails AND crash with SanitizationError (bad UX).
 
 SQL_PATTERNS = [
     r"(--|;|\/\*|\*\/)",
@@ -67,11 +58,7 @@ def sanitize_query(query: str) -> str:
     if len(query) > MAX_QUERY_LENGTH:
         raise SanitizationError(f"Query too long: {len(query)} chars (max {MAX_QUERY_LENGTH})")
 
-    for pattern in COMPILED_INJECTION:
-        if pattern.search(query):
-            logger.warning(f"Prompt injection attempt blocked: {query[:80]}")
-            raise SanitizationError("Query contains disallowed content")
-
+    # SQL injection — structural attack, not something LLM guardrails catch
     for pattern in COMPILED_SQL:
         if pattern.search(query):
             logger.warning(f"SQL injection pattern in query: {query[:80]}")

@@ -1,6 +1,12 @@
 """
 LangGraph-based generation pipeline:
   query_router → generate → hallucination_check → respond
+
+Improvements:
+  - Early-exit: CONVERSATIONAL / OUT_OF_SCOPE skip retrieval entirely
+  - NO_RELEVANT_DOCS type: LLM says "I don't know" instead of forcing irrelevant context
+  - Stream method now uses the same graph (with routing)
+  - Better prompts for cleaner chat behaviour
 """
 
 from __future__ import annotations
@@ -8,7 +14,7 @@ from __future__ import annotations
 from typing import AsyncIterator, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
 from loguru import logger
 
@@ -16,7 +22,7 @@ from config.settings import get_settings
 
 settings = get_settings()
 
-SYSTEM_PROMPT = """You are EnterpriseRAG, an intelligent knowledge assistant.
+SYSTEM_PROMPT = """You are EnterpriseRAG, an intelligent knowledge assistant for enterprise documents.
 Answer questions accurately using ONLY the provided context.
 Always cite sources using [Source N] notation.
 If the context doesn't contain enough information, say so clearly — do not hallucinate.
@@ -30,6 +36,11 @@ Question: {query}
 Provide a comprehensive answer with source citations [Source N].
 If multiple sources support a point, cite all relevant ones."""
 
+NO_CONTEXT_PROMPT = """The user asked: "{query}"
+
+No relevant documents were found in the knowledge base for this query.
+Respond politely that you don't have information on this topic and suggest they try rephrasing or ask about something covered in the uploaded documents."""
+
 HALLUCINATION_CHECK_PROMPT = """You are a factual accuracy checker.
 Review this answer and determine if it contains claims NOT supported by the provided context.
 
@@ -41,13 +52,18 @@ Answer:
 
 Respond with ONLY: "GROUNDED" if all claims are supported, or "HALLUCINATED" if any claim lacks support."""
 
-ROUTER_PROMPT = """Classify this query into one of: 
-- RETRIEVAL: needs knowledge base search
-- CONVERSATIONAL: general chat, greetings, thanks
-- OUT_OF_SCOPE: completely unrelated to enterprise knowledge
+ROUTER_PROMPT = """Classify this query into exactly one of these categories:
+
+- RETRIEVAL: the user is asking a question that requires searching the knowledge base for information (e.g. "what is...", "how does...", "explain...", "tell me about...")
+- CONVERSATIONAL: the user is greeting, thanking, saying goodbye, or making casual small talk (e.g. "hi", "hello", "thanks", "goodbye", "how are you", "hey there")
+- OUT_OF_SCOPE: the user is asking about something completely unrelated to enterprise knowledge (e.g. "write a poem", "what's the weather", "tell a joke")
 
 Query: {query}
-Answer with ONLY the category name."""
+Answer with ONLY the category name: RETRIEVAL, CONVERSATIONAL, or OUT_OF_SCOPE."""
+
+CONVERSATIONAL_SYSTEM = """You are EnterpriseRAG, a friendly assistant for enterprise documents.
+Respond warmly and briefly. If the user greets you, greet them back and mention you can help with their enterprise documents.
+Keep it short — 1-2 sentences max."""
 
 
 class RAGState(TypedDict):
@@ -62,15 +78,15 @@ class RAGState(TypedDict):
 
 class RAGPipeline:
     def __init__(self):
-        self._llm: ChatGoogleGenerativeAI | None = None
+        self._llm: ChatGroq | None = None
         self._graph = None
 
     @property
-    def llm(self) -> ChatGoogleGenerativeAI:
+    def llm(self) -> ChatGroq:
         if self._llm is None:
-            self._llm = ChatGoogleGenerativeAI(
-                model=settings.gemini_model,
-                google_api_key=settings.gemini_api_key,
+            self._llm = ChatGroq(
+                model=settings.groq_model,
+                api_key=settings.groq_api_key,
                 temperature=settings.temperature,
             )
         return self._llm
@@ -81,6 +97,8 @@ class RAGPipeline:
             self._graph = self._build_graph()
         return self._graph
 
+    # ── Graph nodes ──────────────────────────────────────────────────────────
+
     def _route_query(self, state: RAGState) -> RAGState:
         try:
             response = self.llm.invoke(ROUTER_PROMPT.format(query=state["query"]))
@@ -89,23 +107,36 @@ class RAGPipeline:
                 query_type = "RETRIEVAL"
         except Exception:
             query_type = "RETRIEVAL"
-        logger.debug(f"Query type: {query_type}")
+        logger.debug(f"Query routed as: {query_type}")
         return {**state, "query_type": query_type}
 
     def _generate(self, state: RAGState) -> RAGState:
-        if state["query_type"] == "CONVERSATIONAL":
+        # ── RETRIEVAL with no relevant context: don't force irrelevant docs ──
+        if state["query_type"] == "RETRIEVAL" and not state["context"].strip():
+            logger.info("No relevant context found — using no-context path")
             response = self.llm.invoke(
-                [HumanMessage(content=state["query"])]
+                NO_CONTEXT_PROMPT.format(query=state["query"])
             )
-            return {**state, "answer": response.content, "is_grounded": True}
+            return {**state, "answer": response.content, "query_type": "NO_RELEVANT_DOCS", "is_grounded": True}
 
+        # ── CONVERSATIONAL: warm reply, no retrieval needed ──
+        if state["query_type"] == "CONVERSATIONAL":
+            response = self.llm.invoke([
+                SystemMessage(content=CONVERSATIONAL_SYSTEM),
+                HumanMessage(content=state["query"]),
+            ])
+            return {**state, "answer": response.content, "is_grounded": True, "sources": []}
+
+        # ── OUT_OF_SCOPE: polite refusal ──
         if state["query_type"] == "OUT_OF_SCOPE":
             return {
                 **state,
-                "answer": "I can only answer questions about the enterprise knowledge base.",
+                "answer": "I'm sorry, I can only answer questions based on the enterprise knowledge base. Please ask something related to your uploaded documents.",
                 "is_grounded": True,
+                "sources": [],
             }
 
+        # ── RETRIEVAL: generate from context ──
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
@@ -128,7 +159,6 @@ class RAGPipeline:
                 .replace("{answer}", state["answer"])
             )
             response = self.llm.invoke(prompt)
-    
             is_grounded = "GROUNDED" in response.content.upper()
         except Exception:
             is_grounded = True
@@ -154,6 +184,8 @@ class RAGPipeline:
         response = self.llm.invoke(messages)
         return {**state, "answer": response.content, "attempt": 1}
 
+    # ── Build LangGraph ──
+
     def _build_graph(self):
         workflow = StateGraph(RAGState)
         workflow.add_node("route_query", self._route_query)
@@ -171,14 +203,15 @@ class RAGPipeline:
         )
         workflow.add_edge("regenerate", "check_hallucination")
 
-
         return workflow.compile()
 
-    def run(self, query: str, context: str, sources: list[dict]) -> dict:
+    # ── Public API ──
+
+    def run(self, query: str, context: str = "", sources: list[dict] | None = None) -> dict:
         initial_state: RAGState = {
             "query": query,
             "context": context,
-            "sources": sources,
+            "sources": sources or [],
             "answer": "",
             "query_type": "RETRIEVAL",
             "is_grounded": False,

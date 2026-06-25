@@ -15,6 +15,53 @@ except ImportError:
 
 settings = get_settings()
 
+# Refusal keywords — NeMo returns these phrases when it blocks a query.
+REFUSAL_KEYWORDS = [
+    "i can only answer questions related to",
+    "i cannot assist with that request",
+    "i must adhere to my safety guidelines",
+    "i am sorry, but i can only",
+    "i'm sorry, but i can only",
+]
+
+
+def _normalize_response(response) -> str:
+    """NeMo Guardrails can return either a str or a dict like {'role': 'assistant', 'content': '...'}."""
+    if isinstance(response, dict):
+        return response.get("content", str(response))
+    return str(response)
+
+
+def _is_blocked(response) -> bool:
+    """Check if a NeMo Guardrails response is a refusal/block."""
+    text = _normalize_response(response)
+    lowered = text.strip().lower()
+    return any(kw in lowered for kw in REFUSAL_KEYWORDS)
+
+
+def _is_same_content(original: str, guarded: str) -> bool:
+    """Check if the guarded response is substantively the same as the original.
+
+    NeMo Guardrails re-generates the entire answer when checking output,
+    which strips formatting. We only accept the guarded version if it's
+    actually blocking/flagging unsafe content — not if it's just a
+    reformulation of the same safe answer.
+    """
+    if _is_blocked(guarded):
+        return False  # genuinely blocked — use the guarded version
+
+    # If the guarded answer is just a re-phrased version of the same content,
+    # the original (with formatting) is always better.
+    # Heuristic: if the guarded answer is shorter by >40%, it was likely truncated.
+    orig_len = len(original.strip())
+    guard_len = len(guarded.strip())
+
+    if orig_len > 0 and guard_len / orig_len < 0.6:
+        return False  # significant content was lost — use guarded as it may have removed unsafe parts
+
+    return True  # same content — keep the original with its formatting
+
+
 class RAGGuardrails:
     def __init__(self):
         self.enabled = False
@@ -50,15 +97,11 @@ class RAGGuardrails:
             return None
 
         try:
-            # Generate response via guardrails logic
             response = await self.rails.generate_async(prompt=query)
-            # If NeMo Guardrails triggers a block flow (e.g. refuse off topic or jailbreak),
-            # it returns the pre-defined bot refusal string instead of letting the query proceed.
-            if response in [
-                "I am sorry, but I can only answer questions related to the enterprise knowledge base.",
-                "I cannot assist with that request. I must adhere to my safety guidelines."
-            ]:
-                return response
+            if _is_blocked(response):
+                logger.warning(f"Input blocked by NeMo Guardrails: {query[:80]}")
+                response_text = _normalize_response(response)
+                return response_text
         except Exception as e:
             logger.error(f"Error executing input guardrails: {e}")
 
@@ -73,11 +116,10 @@ class RAGGuardrails:
 
         try:
             response = self.rails.generate(prompt=query)
-            if response in [
-                "I am sorry, but I can only answer questions related to the enterprise knowledge base.",
-                "I cannot assist with that request. I must adhere to my safety guidelines."
-            ]:
-                return response
+            if _is_blocked(response):
+                logger.warning(f"Input blocked by NeMo Guardrails: {query[:80]}")
+                response_text = _normalize_response(response)
+                return response_text
         except Exception as e:
             logger.error(f"Error executing sync input guardrails: {e}")
 
@@ -86,19 +128,33 @@ class RAGGuardrails:
     async def check_output(self, query: str, response_text: str) -> str:
         """
         Verify the bot output against output rails.
+        Returns the original response if safe, or a refusal if blocked.
+
+        Key design: NeMo Guardrails re-generates the answer when checking,
+        which strips markdown formatting (headings, lists, etc.). We only
+        replace the original answer when content is actually unsafe — not
+        when the LLM just paraphrases a safe answer.
         """
         if not self.enabled or not self.rails:
             return response_text
 
         try:
-            # Verify output content safety
             checked_response = await self.rails.generate_async(
                 messages=[
                     {"role": "user", "content": query},
                     {"role": "assistant", "content": response_text}
                 ]
             )
-            return checked_response
+            checked_text = _normalize_response(checked_response)
+
+            # Only replace the original if it was actually blocked/flagged
+            if _is_blocked(checked_text):
+                logger.warning(f"Output blocked by NeMo Guardrails: {response_text[:80]}")
+                return checked_text
+
+            # Safe content — always keep the original with its formatting
+            return response_text
+
         except Exception as e:
             logger.error(f"Error executing output guardrails: {e}")
             return response_text
@@ -117,7 +173,16 @@ class RAGGuardrails:
                     {"role": "assistant", "content": response_text}
                 ]
             )
-            return checked_response
+            checked_text = _normalize_response(checked_response)
+
+            # Only replace the original if it was actually blocked/flagged
+            if _is_blocked(checked_text):
+                logger.warning(f"Output blocked by NeMo Guardrails: {response_text[:80]}")
+                return checked_text
+
+            # Safe content — always keep the original with its formatting
+            return response_text
+
         except Exception as e:
             logger.error(f"Error executing sync output guardrails: {e}")
             return response_text

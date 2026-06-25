@@ -11,7 +11,7 @@ import math
 from collections import defaultdict
 
 from langchain_core.documents import Document
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from loguru import logger
 from rank_bm25 import BM25Okapi
 
@@ -31,16 +31,16 @@ Hypothetical passage:"""
 class HybridRetriever:
     def __init__(self, vector_store: VectorStoreManager):
         self.vector_store = vector_store
-        self._llm: ChatGoogleGenerativeAI | None = None
+        self._llm: ChatGroq | None = None
         self._bm25: BM25Okapi | None = None
         self._bm25_docs: list[Document] = []
 
     @property
-    def llm(self) -> ChatGoogleGenerativeAI:
+    def llm(self) -> ChatGroq:
         if self._llm is None:
-            self._llm = ChatGoogleGenerativeAI(
-                model=settings.gemini_model,
-                google_api_key=settings.gemini_api_key,
+            self._llm = ChatGroq(
+                model=settings.groq_model,
+                api_key=settings.groq_api_key,
                 temperature=0.3,
             )
         return self._llm

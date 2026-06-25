@@ -4,10 +4,9 @@ Features: streaming answers, source citation cards, feedback, stats sidebar
 """
 
 import json
-import time
+import os
 from typing import Any
 
-import os
 import requests
 import streamlit as st
 import websocket
@@ -54,6 +53,29 @@ st.markdown(
     border-radius: 4px;
     padding: 3px 10px;
     font-size: 12px;
+}
+.chat-badge {
+    background: #e3f2fd;
+    color: #1565c0;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+}
+.no-docs-badge {
+    background: #fff3e0;
+    color: #e65100;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+}
+.guarded-notice {
+    background: #fce4ec;
+    border: 1px solid #e57373;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 6px 0;
+    font-size: 13px;
+    color: #b71c1c;
 }
 </style>
 """,
@@ -154,9 +176,25 @@ with st.sidebar:
 # ── Main Chat UI ──────────────────────────────────────────────────────────────
 st.title("Ask your knowledge base")
 
+
 def _render_sources(sources: list[dict], meta: dict) -> None:
+    """Render source cards, latencies, and badges — only when there are sources."""
+    query_type = meta.get("query_type", "RETRIEVAL")
+
+    # ── Query type badge ──
+    if query_type == "CONVERSATIONAL":
+        st.markdown('<span class="chat-badge">💬 Chat</span>', unsafe_allow_html=True)
+        return
+    elif query_type == "NO_RELEVANT_DOCS":
+        st.markdown('<span class="no-docs-badge">📋 No relevant docs found</span>', unsafe_allow_html=True)
+        return
+    elif query_type == "OUT_OF_SCOPE":
+        st.markdown('<span class="no-docs-badge">🚫 Out of scope</span>', unsafe_allow_html=True)
+        return
+
     if not sources:
         return
+
     with st.expander(f"📚 {len(sources)} sources", expanded=False):
         cols = st.columns(min(len(sources), 3))
         for i, src in enumerate(sources):
@@ -186,14 +224,15 @@ def _render_sources(sources: list[dict], meta: dict) -> None:
         st.markdown(f'<span class="{badge}">{label}</span>', unsafe_allow_html=True)
 
 
+# ── Render chat history ──
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if msg["role"] == "assistant" and "sources" in msg:
-            _render_sources(msg["sources"], msg.get("meta", {}))
+        if msg["role"] == "assistant" and "meta" in msg:
+            _render_sources(msg.get("sources", []), msg["meta"])
 
 
-
+# ── Query functions ──
 
 def _query_streaming(query: str) -> tuple[str, list[dict], dict]:
     ws_url = API_BASE.replace("http", "ws") + "/ws/query"
@@ -216,7 +255,17 @@ def _query_streaming(query: str) -> tuple[str, list[dict], dict]:
             elif chunk["type"] == "token":
                 full_answer += chunk["data"]
                 placeholder.markdown(full_answer + "▌")
+            elif chunk["type"] == "output_guarded":
+                # NeMo Guardrails modified/blocked the output — show corrected version
+                guarded_answer = chunk["data"]
+                placeholder.markdown(guarded_answer)
+                full_answer = guarded_answer
+                st.markdown(
+                    '<div class="guarded-notice">⚠️ Response was modified by safety guardrails</div>',
+                    unsafe_allow_html=True,
+                )
             elif chunk["type"] == "done":
+                meta["query_type"] = chunk.get("query_type", "RETRIEVAL")
                 break
             elif chunk["type"] == "error":
                 st.error(chunk["data"])
@@ -227,6 +276,13 @@ def _query_streaming(query: str) -> tuple[str, list[dict], dict]:
     except Exception as e:
         st.error(f"Streaming error: {e}. Falling back to REST...")
         full_answer, sources, meta = _query_rest(query)
+
+    # Fallback query_type for REST path or edge cases
+    if "query_type" not in meta:
+        if not sources:
+            meta["query_type"] = "CONVERSATIONAL"
+        else:
+            meta["query_type"] = "RETRIEVAL"
 
     return full_answer, sources, meta
 
@@ -246,6 +302,7 @@ def _query_rest(query: str) -> tuple[str, list[dict], dict]:
     }
 
 
+# ── Chat input ──
 if prompt := st.chat_input("Ask anything about your knowledge base..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
