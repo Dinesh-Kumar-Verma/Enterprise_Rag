@@ -29,8 +29,6 @@ services:
     depends_on:
       chromadb:
         condition: service_healthy
-    volumes:
-      - ./:/app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -48,8 +46,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    volumes:
-      - ./frontend:/app/frontend
 
 volumes:
   chroma_data:

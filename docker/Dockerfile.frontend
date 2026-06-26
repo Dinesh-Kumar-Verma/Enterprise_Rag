@@ -1,11 +1,17 @@
 FROM python:3.11-slim
 
+# ── Install uv from official image ─────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir streamlit streamlit-chat websocket-client requests
+# ── Dependency layer (cached unless requirements-frontend.txt changes) ─────────
+COPY requirements-frontend.txt ./
+RUN uv pip install --system -r requirements-frontend.txt
 
+# ── Application code ───────────────────────────────────────────────────────────
 COPY frontend/ ./frontend/
+COPY config/  ./config/
 
 EXPOSE 8501
 
