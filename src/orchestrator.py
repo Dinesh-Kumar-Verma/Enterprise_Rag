@@ -283,10 +283,3 @@ class EnterpriseRAG:
             },
         }
 
-
-def main():
-    file_path = r"C:\Users\Dinesh Verma\Downloads\Two Pointer Pattern.pdf"
-    EnterpriseRAG().ingest_file(file_path)
-
-if __name__ == "__main__":
-    main()

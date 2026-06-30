@@ -1,26 +1,41 @@
-FROM python:3.11-slim
+# ── Stage 1: Builder ──────────────────────────────────────────────────────────
+# Install all Python packages. Heavy build tools (GCC) stay here only.
+FROM python:3.11-slim AS builder
 
-# ── Install uv from official image ─────────────────────────────────────────────
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# ── System deps for native extensions (e.g. sentence-transformers, chromadb) ──
+# System deps for compiling C extensions (torch, grpcio, numpy, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CPU-only PyTorch first to avoid ~2 GB NVIDIA CUDA packages
+RUN uv pip install --system --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install API-only dependencies (no streamlit, unstructured, ragas, pytest, etc.)
+COPY requirements-api.txt ./
+RUN uv pip install --system --no-cache-dir -r requirements-api.txt
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+# Slim image with only runtime packages — no compiler, no build artifacts
+FROM python:3.11-slim
+
+# Only curl needed at runtime (for healthcheck)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Install CPU-only PyTorch first to avoid ~2 GB NVIDIA CUDA packages ─────────
-# sentence-transformers needs torch; the CPU wheel avoids nvidia-cusolver etc.
-RUN uv pip install --system torch --index-url https://download.pytorch.org/whl/cpu
+WORKDIR /app
 
-# ── Dependency layer (cached unless requirements.txt changes) ──────────────────
-COPY requirements.txt ./
-RUN uv pip install --system -r requirements.txt
+# Copy installed packages from builder (no compiler, no build artifacts)
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# ── Application code ───────────────────────────────────────────────────────────
-COPY . .
+# Copy application code only (frontend, scripts, tests excluded via .dockerignore)
+COPY src/ ./src/
+COPY config/ ./config/
 
 EXPOSE 8000
 
